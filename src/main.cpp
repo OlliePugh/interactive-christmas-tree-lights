@@ -2,6 +2,8 @@
 #include <FastLED.h>
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
 
 #include "Secrets.h"
 
@@ -13,11 +15,68 @@ CRGB leds[NUM_LEDS];
 // SSID & Password
 const char *ssid = WIFI_SSID;     // Enter your SSID here
 const char *password = WIFI_PASS; // Enter your Password here
+const char *getFullLightsUrl = GET_FULL_LIGHTS_URL;
 
 AsyncWebServer server(80); // Object of WebServer(HTTP port, 80 is defult)
+float intensityReducer = 0.2;
+
+void setLightColour(int index, const String *hex)
+{
+  int colourHex = (int)strtol(hex->c_str(), NULL, 16);
+  Serial.printf("Updating light %d to colour %s\n", index, hex);
+
+  // Split them up into r, g, b values
+  int g = colourHex >> 16;
+  int r = colourHex >> 8 & 0xFF;
+  int b = colourHex & 0xFF;
+  leds[index] = CRGB(r * intensityReducer, g * intensityReducer, b * intensityReducer);
+}
+
+void initialiseLights()
+{
+  Serial.println("Getting full lights status");
+  HTTPClient http;
+  Serial.println(getFullLightsUrl);
+  http.begin(getFullLightsUrl);
+  http.addHeader("Authorization", API_KEY);
+  int httpResponseCode = http.GET();
+
+  if (httpResponseCode > 0)
+  {
+    Serial.print("HTTP Response code: ");
+    Serial.println(httpResponseCode);
+    String payload = http.getString();
+    StaticJsonDocument<2048> doc;
+    DeserializationError error = deserializeJson(doc, payload);
+
+    // Test if parsing succeeds.
+    if (error)
+    {
+      Serial.print(F("deserializeJson() failed: "));
+      Serial.println(error.f_str());
+      return;
+    }
+    JsonArray arr = doc.as<JsonArray>();
+
+    int counter = 0;
+    for (JsonVariant value : arr)
+    {
+      String hex = value.as<String>();
+      hex.remove(0, 1); // remove the #
+      setLightColour(counter++, &hex);
+    }
+  }
+  else
+  {
+    Serial.print("Error code: ");
+    Serial.println(httpResponseCode);
+  }
+  // Free resources
+  http.end();
+}
 
 // Handle root url (/)
-void handle_root(AsyncWebServerRequest *request)
+void handleRoot(AsyncWebServerRequest *request)
 {
   if (!request->hasHeader("Authorization"))
   {
@@ -41,14 +100,7 @@ void handle_root(AsyncWebServerRequest *request)
   AsyncWebParameter *colour = request->getParam("colour");
   AsyncWebParameter *bulbId = request->getParam("bulb-id");
   int bulbIdInt = bulbId->value().toInt();
-  int colourHex = (int)strtol(colour->value().c_str(), NULL, 16);
-  Serial.printf("Updating light %d to colour %s\n", bulbIdInt, colour->value());
-
-  // Split them up into r, g, b values
-  int g = colourHex >> 16;
-  int r = colourHex >> 8 & 0xFF;
-  int b = colourHex & 0xFF;
-  leds[bulbIdInt] = CRGB(r, g, b);
+  setLightColour(bulbIdInt, &colour->value());
   request->send(200);
 }
 
@@ -78,7 +130,9 @@ void setup()
   Serial.print("Got IP: ");
   Serial.println(WiFi.localIP()); // Show ESP32 IP on serial
 
-  server.on("/", HTTP_GET, handle_root);
+  initialiseLights();
+
+  server.on("/", HTTP_GET, handleRoot);
 
   server.begin();
   Serial.println("HTTP server started");
